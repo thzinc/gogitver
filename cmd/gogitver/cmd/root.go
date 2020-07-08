@@ -6,11 +6,12 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/syncromatics/gogitver/pkg/git"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
+	"github.com/syncromatics/gogitver/pkg/git"
 
 	gogit "gopkg.in/src-d/go-git.v4"
+	"gopkg.in/src-d/go-git.v4/plumbing"
 )
 
 var rootCmd = &cobra.Command{
@@ -36,7 +37,7 @@ func init() {
 		cmd.Flags().BoolP("verbose", "v", false, "Show information about how the version was calculated")
 	}
 
-	rootCmd.Flags().Bool("forbid-behind-master", false, "error if the current branch's calculated version is behind the calculated version of refs/heads/master")
+	rootCmd.Flags().Bool("forbid-behind-master", false, "error if the current branch's calculated version is behind the calculated version of refs/heads/master") // TODO: Deprecate 'master'
 
 	rootCmd.AddCommand(prereleaseCmd)
 }
@@ -89,8 +90,9 @@ func getBranchSettings(cmd *cobra.Command) *git.BranchSettings {
 	fbm := getBoolFromFlag(cmd, "forbid-behind-master")
 	trimPrefix := getBoolFromFlag(cmd, "trim-branch-prefix")
 	return &git.BranchSettings{
-		ForbidBehindMaster: fbm,
-		TrimBranchPrefix:   trimPrefix,
+		ForbidBehindDefaultBranch: fbm,
+		TrimBranchPrefix:          trimPrefix,
+		DefaultBranch:             plumbing.Master, // TODO: get from cmd
 	}
 }
 

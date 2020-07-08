@@ -11,6 +11,7 @@ import (
 	"gopkg.in/src-d/go-billy.v4/memfs"
 	"gopkg.in/src-d/go-billy.v4/util"
 	git "gopkg.in/src-d/go-git.v4"
+	"gopkg.in/src-d/go-git.v4/config"
 	"gopkg.in/src-d/go-git.v4/plumbing"
 	"gopkg.in/src-d/go-git.v4/plumbing/object"
 	"gopkg.in/src-d/go-git.v4/storage/memory"
@@ -18,9 +19,11 @@ import (
 	igit "github.com/syncromatics/gogitver/pkg/git"
 )
 
-func Test_ShouldCalculateVersionFromCommitsInMaster(t *testing.T) {
+var Main plumbing.ReferenceName = plumbing.ReferenceName("refs/heads/main")
+
+func Test_ShouldCalculateVersionFromCommitsInMain(t *testing.T) {
 	// Arrange
-	repository, worktree := initRepository(t)
+	repository, worktree := initRepository(t, Main)
 
 	commitMultiple(t, worktree,
 		"(+semver: breaking) This is a major commit\n",
@@ -35,6 +38,7 @@ func Test_ShouldCalculateVersionFromCommitsInMaster(t *testing.T) {
 	settings := igit.GetDefaultSettings()
 	branchSettings := &igit.BranchSettings{
 		IgnoreEnvVars: true,
+		DefaultBranch: Main,
 	}
 
 	// Act
@@ -45,9 +49,53 @@ func Test_ShouldCalculateVersionFromCommitsInMaster(t *testing.T) {
 	assert.Equal(t, "2.2.3", version)
 }
 
+func Test_ShouldCalculateVersionFromCommitsWithRemoteOriginHead(t *testing.T) {
+	// Arrange
+	repository, worktree := initRepository(t, Main)
+	hash := commitMultiple(t, worktree, "Initial commit")
+
+	_, err := repository.CreateRemote(&config.RemoteConfig{
+		Name: "origin",
+		URLs: []string{"/dev/null"},
+		Fetch: []config.RefSpec{
+			config.RefSpec("+refs/heads/*:refs/remotes/origin/*"),
+		},
+	})
+	assert.Nil(t, err)
+
+	err = repository.Storer.SetReference(plumbing.NewHashReference("refs/remotes/origin/main", hash))
+	assert.Nil(t, err)
+
+	err = repository.Storer.SetReference(plumbing.NewReferenceFromStrings("refs/remotes/origin/HEAD", "ref: refs/remotes/origin/main"))
+	assert.Nil(t, err)
+
+	commitMultiple(t, worktree,
+		"(+semver: breaking) This is a major commit\n",
+		"(+semver: major) This is also a major commit\n",
+		"(+semver: feature) This is a minor commit\n",
+		"(+semver: minor) This is also a minor commit\n",
+		"(+semver: fix) This is a patch commit\n",
+		"(+semver: patch) This is also a patch commit\n",
+		"This is also a patch commit\n",
+	)
+
+	settings := igit.GetDefaultSettings()
+	branchSettings := &igit.BranchSettings{
+		IgnoreEnvVars: true,
+		DefaultBranch: plumbing.Master,
+	}
+
+	// Act
+	version, err := igit.GetCurrentVersion(repository, settings, branchSettings, true)
+	assert.Nil(t, err)
+
+	// Assert
+	assert.Equal(t, "2.2.3", version)
+}
+
 func Test_ShouldCalculateVersionFromCommitsInBranch(t *testing.T) {
 	// Arrange
-	repository, worktree := initRepository(t)
+	repository, worktree := initRepository(t, plumbing.Master)
 
 	commitMultiple(t, worktree, "Initial commit")
 
@@ -79,11 +127,11 @@ func Test_ShouldCalculateVersionFromCommitsInBranch(t *testing.T) {
 	assert.Equal(t, expected, version)
 }
 
-func Test_ShouldCalculateVersionFromCommitsInMasterWithMergeCommits(t *testing.T) {
+func Test_ShouldCalculateVersionFromCommitsInMainWithMergeCommits(t *testing.T) {
 	// Arrange
-	repository, worktree := initRepository(t)
+	repository, worktree := initRepository(t, plumbing.Master)
 
-	masterHash := commitMultiple(t, worktree, "Initial commit")
+	mainHash := commitMultiple(t, worktree, "Initial commit")
 
 	err := worktree.Checkout(&git.CheckoutOptions{
 		Create: true,
@@ -103,10 +151,10 @@ func Test_ShouldCalculateVersionFromCommitsInMasterWithMergeCommits(t *testing.T
 	})
 	assert.Nil(t, err)
 
-	masterHash, err = worktree.Commit("merged a-branch\n", &git.CommitOptions{
+	mainHash, err = worktree.Commit("merged a-branch\n", &git.CommitOptions{
 		Author: defaultSignature(),
 		Parents: []plumbing.Hash{
-			masterHash,
+			mainHash,
 			branchHash,
 		},
 	})
@@ -128,10 +176,10 @@ func Test_ShouldCalculateVersionFromCommitsInMasterWithMergeCommits(t *testing.T
 	})
 	assert.Nil(t, err)
 
-	masterHash, err = worktree.Commit("merged another-branch\n", &git.CommitOptions{
+	mainHash, err = worktree.Commit("merged another-branch\n", &git.CommitOptions{
 		Author: defaultSignature(),
 		Parents: []plumbing.Hash{
-			masterHash,
+			mainHash,
 			branchHash,
 		},
 	})
@@ -157,7 +205,7 @@ func Test_ShouldCalculateVersionFromCommitsInMasterWithMergeCommits(t *testing.T
 	_, err = worktree.Commit("merged yet-another-branch\n", &git.CommitOptions{
 		Author: defaultSignature(),
 		Parents: []plumbing.Hash{
-			masterHash,
+			mainHash,
 			branchHash,
 		},
 	})
@@ -178,7 +226,7 @@ func Test_ShouldCalculateVersionFromCommitsInMasterWithMergeCommits(t *testing.T
 
 func Test_ShouldCalculateVersionFromLightweightTag(t *testing.T) {
 	// Arrange
-	repository, worktree := initRepository(t)
+	repository, worktree := initRepository(t, plumbing.Master)
 
 	hash := commitMultiple(t, worktree,
 		"(+semver: breaking)\n",
@@ -209,7 +257,7 @@ func Test_ShouldCalculateVersionFromLightweightTag(t *testing.T) {
 
 func Test_ShouldFailToCalculateVersionFromImproperlyNamedLightweightTag(t *testing.T) { // TODO: Submit a PR that allows this condition to exist; ignore unparsable tags
 	// Arrange
-	repository, worktree := initRepository(t)
+	repository, worktree := initRepository(t, plumbing.Master)
 
 	hash := commitMultiple(t, worktree, "Initial commit")
 
@@ -231,7 +279,7 @@ func Test_ShouldFailToCalculateVersionFromImproperlyNamedLightweightTag(t *testi
 
 func Test_ShouldCalculateVersionFromAnnotatedTag(t *testing.T) {
 	// Arrange
-	repository, worktree := initRepository(t)
+	repository, worktree := initRepository(t, plumbing.Master)
 
 	hash := commitMultiple(t, worktree,
 		"(+semver: breaking)\n",
@@ -276,7 +324,7 @@ func Test_ShouldCalculateVersionFromAnnotatedTag(t *testing.T) {
 
 func Test_ShouldCalculateVersionFromTravisTag(t *testing.T) {
 	// Arrange
-	repository, worktree := initRepository(t)
+	repository, worktree := initRepository(t, plumbing.Master)
 
 	commitMultiple(t, worktree, "Initial commit")
 
@@ -292,13 +340,14 @@ func Test_ShouldCalculateVersionFromTravisTag(t *testing.T) {
 	assert.Equal(t, "1.2.3", version)
 }
 
-func initRepository(t *testing.T) (*git.Repository, *git.Worktree) {
+func initRepository(t *testing.T, defaultBranch plumbing.ReferenceName) (*git.Repository, *git.Worktree) {
 	fs := memfs.New()
 	storage := memory.NewStorage()
 
 	repository, err := git.Init(storage, fs)
 	assert.Nil(t, err)
 
+	storage.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, defaultBranch))
 	worktree, err := repository.Worktree()
 	assert.Nil(t, err)
 

@@ -16,9 +16,10 @@ import (
 
 // BranchSettings contains flags that determine how branches are handled when calculating versions.
 type BranchSettings struct {
-	ForbidBehindMaster bool
-	TrimBranchPrefix   bool
-	IgnoreEnvVars      bool
+	ForbidBehindDefaultBranch bool
+	TrimBranchPrefix          bool
+	IgnoreEnvVars             bool
+	DefaultBranch             plumbing.ReferenceName
 }
 
 type gitVersion struct {
@@ -106,6 +107,59 @@ func GetPrereleaseLabel(r *git.Repository, settings *Settings, branchSettings *B
 	return getCurrentBranch(r, h, branchSettings)
 }
 
+func getDefaultBranch(r *git.Repository, defaultBranch plumbing.ReferenceName, verbose bool) (*plumbing.Reference, error) {
+	logger := func(format string, v ...interface{}) {
+		if verbose {
+			log.Printf(format, v...)
+		}
+	}
+
+	tryResolve := func(refName plumbing.ReferenceName) (*plumbing.Reference, error) {
+		logger("attempting to resolve %s", refName)
+		ref, err := r.Reference(refName, true)
+		if err != nil {
+			return nil, err
+		}
+
+		log.Printf("resolved default branch %s", ref.Name())
+		return ref, nil
+	}
+
+	ref, err := tryResolve(defaultBranch)
+	if err == nil {
+		return ref, nil
+	}
+
+	if defaultBranch != plumbing.Master {
+		ref, err = tryResolve(plumbing.Master)
+		if err == nil {
+			return ref, nil
+		}
+	}
+
+	origin, err := r.Remote("origin")
+	if err == nil {
+		ref, err = tryResolve("refs/remotes/origin/HEAD")
+		if err == nil {
+			for _, rs := range origin.Config().Fetch {
+				rs := rs.Reverse()
+				if rs.Match(ref.Name()) {
+					localRefName := rs.Dst(ref.Name())
+					if string(localRefName[0]) == "+" {
+						localRefName = localRefName[1:]
+					}
+					ref, err = tryResolve(localRefName)
+					if err == nil {
+						return ref, nil
+					}
+				}
+			}
+		}
+	}
+
+	return nil, errors.New("failed to get default branch")
+}
+
 func getVersion(r *git.Repository, h *plumbing.Reference, tagMap map[string]string, branchSettings *BranchSettings, settings *Settings, verbose bool) (version *semver.Version, err error) {
 	currentBranch, err := getCurrentBranch(r, h, branchSettings)
 	if err != nil {
@@ -115,26 +169,23 @@ func getVersion(r *git.Repository, h *plumbing.Reference, tagMap map[string]stri
 		log.Printf("Current branch is %s", currentBranch)
 	}
 
-	masterHead, err := r.Reference("refs/heads/master", false)
+	defaultBranch, err := getDefaultBranch(r, branchSettings.DefaultBranch, verbose)
 	if err != nil {
-		masterHead, err = r.Reference("refs/remotes/origin/master", false) // TODO: This needs test coverage
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to get master branch at 'refs/heads/master, 'refs/remotes/origin/master'")
-		}
+		return nil, err
 	}
 
-	masterCommit, err := r.CommitObject(masterHead.Hash())
+	defaultHead, err := r.CommitObject(defaultBranch.Hash())
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to get master commit from reference")
 	}
 
-	masterWalker := newBranchWalker(r, masterCommit, tagMap, settings, true, "", verbose)
+	masterWalker := newBranchWalker(r, defaultHead, tagMap, settings, true, "", verbose)
 	masterVersion, err := masterWalker.GetVersion()
 	if err != nil {
 		return nil, err
 	}
 
-	if h.Hash() == masterHead.Hash() {
+	if h.Hash() == defaultBranch.Hash() {
 		return masterVersion, nil
 	}
 
@@ -143,7 +194,7 @@ func getVersion(r *git.Repository, h *plumbing.Reference, tagMap map[string]stri
 		return nil, errors.Wrap(err, "getVersion failed")
 	}
 
-	walker := newBranchWalker(r, c, tagMap, settings, false, masterHead.Hash().String(), verbose)
+	walker := newBranchWalker(r, c, tagMap, settings, false, defaultBranch.Hash().String(), verbose)
 	versionMap, err := walker.GetVersionMap()
 	if err != nil {
 		return nil, err
@@ -182,7 +233,7 @@ func getVersion(r *git.Repository, h *plumbing.Reference, tagMap map[string]stri
 	prerelease := fmt.Sprintf("%s-%d-%s", currentBranch, len(versionMap)-1, shortHash)
 	baseVersion.PreRelease = semver.PreRelease(prerelease)
 
-	if branchSettings.ForbidBehindMaster && baseVersion.LessThan(*masterVersion) {
+	if branchSettings.ForbidBehindDefaultBranch && baseVersion.LessThan(*masterVersion) {
 		return nil, errors.Errorf("Branch has calculated version '%s' whose version is less than master '%s'", baseVersion, masterVersion)
 	}
 
